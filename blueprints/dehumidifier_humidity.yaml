@@ -127,6 +127,12 @@ mode: queued
 max: 3
 max_exceeded: silent
 
+# Inputs used inside TRIGGER templates must come through trigger_variables
+# (automation-level `variables:` aren't available when triggers are evaluated).
+trigger_variables:
+  tank_sensor_t: !input tank_sensor
+  tank_full_state_t: !input tank_full_state
+
 variables:
   dehumidifier: !input dehumidifier
   force_mode: !input force_mode
@@ -153,14 +159,18 @@ triggers:
     below: !input humidity_low
     for: !input debounce
     id: target_reached
-  - trigger: state
-    entity_id: !input tank_sensor
-    to: !input tank_full_state
+  # Template triggers (not `state` with entity_id) so an EMPTY optional tank
+  # sensor simply never fires — an empty entity_id list would break the automation.
+  - trigger: template
+    value_template: >-
+      {{ tank_sensor_t is string and tank_sensor_t not in ['', 'none', 'unknown', 'unavailable']
+         and is_state(tank_sensor_t, tank_full_state_t) }}
     for: { seconds: 30 }
     id: tank_full
-  - trigger: state
-    entity_id: !input tank_sensor
-    from: !input tank_full_state
+  - trigger: template
+    value_template: >-
+      {{ tank_sensor_t is string and tank_sensor_t not in ['', 'none', 'unknown', 'unavailable']
+         and not is_state(tank_sensor_t, tank_full_state_t) }}
     id: tank_cleared
   - trigger: time_pattern
     minutes: !input periodic_minutes
