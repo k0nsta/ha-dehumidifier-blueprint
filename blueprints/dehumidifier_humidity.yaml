@@ -116,7 +116,9 @@ blueprint:
         tank_full_actions:
           name: Tank-full actions
           description: >
-            Runs once when the tank becomes full (after the unit is stopped) — e.g.
+            The dehumidifier is **already turned off automatically** when the tank fills — you do
+            NOT need a turn-off action here. This field is for EXTRAS that run once afterwards,
+            typically a notification, e.g.
 
             - action: notify.notify
               data: { title: "Dehumidifier tank full", message: "Empty the water tank." }
