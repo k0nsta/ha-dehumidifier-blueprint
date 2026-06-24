@@ -1,0 +1,204 @@
+blueprint:
+  name: Dehumidifier — humidity control + tank-full guard
+  description: >
+    Govern any `humidifier` (dehumidifier) from a **humidity sensor** with proper
+    **hysteresis** — run above a high threshold, stop at a lower one — and stop + alert
+    when the **water tank is full**.
+
+    The unit's own humidistat is bypassed: HA decides on/off so your *room* sensor wins,
+    not the dry air at the unit's outlet. Optionally **force a run mode** on start (e.g.
+    Tuya units that mislabel "Continuous" as `Continuities`) so the unit doesn't stop
+    itself before HA's low threshold is reached.
+
+    A **periodic safety re-check** (optional) re-evaluates the humidity at a fixed interval,
+    so the unit still kicks in if RH sits steadily high without a fresh threshold *crossing*
+    (e.g. after an HA restart). Tank-full / notification reactions are free-form **action**
+    fields — wire your own `notify.*`. Run one instance per dehumidifier.
+  domain: automation
+  source_url: https://github.com/k0nsta/ha-dehumidifier-blueprint/blob/master/blueprints/dehumidifier_humidity.yaml
+  input:
+    sec_unit:
+      name: 1 · Dehumidifier
+      icon: mdi:air-humidifier-off
+      input:
+        dehumidifier:
+          name: Dehumidifier (humidifier entity)
+          description: The `humidifier` entity HA will turn on/off.
+          selector:
+            entity:
+              filter:
+                - { domain: humidifier }
+        force_mode:
+          name: Force run mode on start (optional)
+          description: >
+            Mode HA sets every time it starts the unit, so the unit's onboard humidistat can't
+            stop it early. Must match a mode the unit reports (e.g. `Continuous`, or the Tuya
+            typo `Continuities`). Leave empty to never call set_mode.
+          default: ""
+          selector: { text: {} }
+    sec_humidity:
+      name: 2 · Humidity control
+      icon: mdi:water-percent
+      input:
+        humidity_sensor:
+          name: Humidity sensor
+          description: The room humidity `sensor` that drives the loop (ideally NOT the unit's onboard sensor).
+          selector:
+            entity:
+              filter:
+                - { domain: sensor, device_class: humidity }
+        humidity_high:
+          name: Turn ON above (%)
+          description: Start the dehumidifier once humidity rises above this.
+          default: 55
+          selector: { number: { min: 30, max: 90, step: 1, unit_of_measurement: "%", mode: slider } }
+        humidity_low:
+          name: Turn OFF at / below (%)
+          description: Stop once humidity drops to this. Keep a few % below the ON value — that gap is the hysteresis that stops short-cycling.
+          default: 50
+          selector: { number: { min: 25, max: 85, step: 1, unit_of_measurement: "%", mode: slider } }
+        debounce:
+          name: Sustain for
+          description: Humidity must stay past a threshold this long before HA acts (filters spikes).
+          default: { minutes: 5 }
+          selector: { duration: {} }
+        on_actions:
+          name: On-start actions (optional)
+          description: Runs after the unit is turned on — e.g. a quiet notification.
+          default: []
+          selector: { action: {} }
+        off_actions:
+          name: On-stop actions (optional)
+          description: Runs after the unit is turned off because the target was reached.
+          default: []
+          selector: { action: {} }
+    sec_periodic:
+      name: 3 · Periodic safety re-check
+      icon: mdi:timer-sync
+      input:
+        periodic_check:
+          name: Enable periodic re-check
+          description: >
+            Re-evaluate humidity on a fixed interval, not only on threshold crossings, so a
+            steadily-high room still gets dried (e.g. after an HA restart).
+          default: true
+          selector: { boolean: {} }
+        periodic_minutes:
+          name: Re-check interval
+          description: How often the safety re-check runs (ignored if disabled above).
+          default: "/30"
+          selector:
+            select:
+              options:
+                - { label: Every 10 min, value: "/10" }
+                - { label: Every 15 min, value: "/15" }
+                - { label: Every 30 min, value: "/30" }
+                - { label: Every hour, value: "0" }
+    sec_tank:
+      name: 4 · Water tank
+      icon: mdi:cup-water
+      input:
+        tank_sensor:
+          name: Tank-full sensor (optional)
+          description: A `binary_sensor` that reports when the water tank is full. Leave empty to skip tank handling.
+          default: []
+          selector:
+            entity:
+              filter:
+                - { domain: binary_sensor }
+        tank_full_state:
+          name: State that means "full"
+          description: Which state of the tank sensor counts as full.
+          default: "on"
+          selector:
+            select:
+              options: ["on", "off"]
+        tank_full_actions:
+          name: Tank-full actions
+          description: >
+            Runs once when the tank becomes full (after the unit is stopped) — e.g.
+
+            - action: notify.notify
+              data: { title: "Dehumidifier tank full", message: "Empty the water tank." }
+          default: []
+          selector: { action: {} }
+
+mode: queued
+max: 3
+max_exceeded: silent
+
+variables:
+  dehumidifier: !input dehumidifier
+  force_mode: !input force_mode
+  humidity_sensor: !input humidity_sensor
+  humidity_high: !input humidity_high
+  humidity_low: !input humidity_low
+  periodic_check: !input periodic_check
+  tank_sensor: !input tank_sensor
+  tank_full_state: !input tank_full_state
+  current_rh: "{{ states(humidity_sensor) | float(-1) }}"
+  is_on: "{{ is_state(dehumidifier, 'on') }}"
+  tank_full: >-
+    {{ tank_sensor is string and tank_sensor not in ['', 'none', 'unknown', 'unavailable']
+       and is_state(tank_sensor, tank_full_state) }}
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input humidity_sensor
+    above: !input humidity_high
+    for: !input debounce
+    id: too_humid
+  - trigger: numeric_state
+    entity_id: !input humidity_sensor
+    below: !input humidity_low
+    for: !input debounce
+    id: target_reached
+  - trigger: state
+    entity_id: !input tank_sensor
+    to: !input tank_full_state
+    for: { seconds: 30 }
+    id: tank_full
+  - trigger: state
+    entity_id: !input tank_sensor
+    from: !input tank_full_state
+    id: tank_cleared
+  - trigger: time_pattern
+    minutes: !input periodic_minutes
+    id: periodic
+
+conditions: []
+
+action:
+  - choose:
+      # ===== Tank full: stop, and alert once on the transition =====
+      - conditions:
+          - "{{ tank_full }}"
+        sequence:
+          - if: "{{ is_on }}"
+            then:
+              - action: humidifier.turn_off
+                target: { entity_id: "{{ dehumidifier }}" }
+          - if: "{{ trigger.id == 'tank_full' }}"
+            then:
+              - sequence: !input tank_full_actions
+      # ===== Periodic tick while disabled: do nothing =====
+      - conditions:
+          - "{{ trigger.id == 'periodic' and not periodic_check }}"
+        sequence: []
+    # ===== Tank OK → humidity hysteresis control =====
+    default:
+      - if: "{{ current_rh >= (humidity_high | float) and not is_on }}"
+        then:
+          - action: humidifier.turn_on
+            target: { entity_id: "{{ dehumidifier }}" }
+          - if: "{{ force_mode is string and force_mode not in ['', 'none'] }}"
+            then:
+              - action: humidifier.set_mode
+                target: { entity_id: "{{ dehumidifier }}" }
+                data: { mode: "{{ force_mode }}" }
+          - sequence: !input on_actions
+      - if: "{{ current_rh > -1 and current_rh <= (humidity_low | float) and is_on }}"
+        then:
+          - action: humidifier.turn_off
+            target: { entity_id: "{{ dehumidifier }}" }
+          - sequence: !input off_actions
