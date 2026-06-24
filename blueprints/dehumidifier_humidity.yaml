@@ -31,9 +31,10 @@ blueprint:
         force_mode:
           name: Force run mode on start (optional)
           description: >
-            Mode HA sets every time it starts the unit, so the unit's onboard humidistat can't
-            stop it early. Must match a mode the unit reports (e.g. `Continuous`, or the Tuya
-            typo `Continuities`). Leave empty to never call set_mode.
+            Mode HA sets when it starts the unit AND re-asserts on every periodic re-check if the
+            unit has drifted off it (Tuya units revert to Auto after a power-cycle or reconnect),
+            so the unit's onboard humidistat can't stop it early. Must match a mode the unit reports
+            (e.g. `Continuous`, or the Tuya typo `Continuities`). Leave empty to never call set_mode.
           default: ""
           selector: { text: {} }
     sec_humidity:
@@ -205,6 +206,10 @@ action:
             target: { entity_id: "{{ dehumidifier }}" }
           - if: "{{ force_mode is string and force_mode not in ['', 'none'] }}"
             then:
+              # Brief settle so the unit has finished powering on before we set the
+              # mode — LocalTuya/Tuya units can drop a set_mode sent in the same instant
+              # as turn_on, leaving the unit in its power-on default (e.g. Auto).
+              - delay: { seconds: 3 }
               - action: humidifier.set_mode
                 target: { entity_id: "{{ dehumidifier }}" }
                 data: { mode: "{{ force_mode }}" }
@@ -214,3 +219,16 @@ action:
           - action: humidifier.turn_off
             target: { entity_id: "{{ dehumidifier }}" }
           - sequence: !input off_actions
+      # Re-assert the forced mode if the unit is running but has drifted off it — Tuya
+      # units revert to their onboard default (e.g. Auto) after a power-cycle or a
+      # connection drop/reconnect, and in Auto their onboard humidistat stops the unit
+      # early, overriding HA's room-sensor hysteresis. This runs on every periodic tick
+      # (and any threshold trigger), pinning the unit back to force_mode so HA stays in
+      # control. No-op when force_mode is unset or already active.
+      - if: >-
+          {{ is_on and force_mode is string and force_mode not in ['', 'none']
+             and state_attr(dehumidifier, 'mode') != force_mode }}
+        then:
+          - action: humidifier.set_mode
+            target: { entity_id: "{{ dehumidifier }}" }
+            data: { mode: "{{ force_mode }}" }
