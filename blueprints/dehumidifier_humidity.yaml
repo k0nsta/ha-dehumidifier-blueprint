@@ -37,6 +37,18 @@ blueprint:
             (e.g. `Continuous`, or the Tuya typo `Continuities`). Leave empty to never call set_mode.
           default: ""
           selector: { text: {} }
+        enable_switch:
+          name: Enable switch (optional)
+          description: >
+            A toggle that gates the whole loop. When this is OFF, HA turns the unit off and ignores
+            every humidity threshold and periodic re-check until it's switched back ON — a manual
+            "park it" override. Leave empty to always run.
+          default: []
+          selector:
+            entity:
+              filter:
+                - { domain: input_boolean }
+                - { domain: switch }
     sec_humidity:
       name: 2 · Humidity control
       icon: mdi:water-percent
@@ -135,6 +147,7 @@ max_exceeded: silent
 trigger_variables:
   tank_sensor_t: !input tank_sensor
   tank_full_state_t: !input tank_full_state
+  enable_switch_t: !input enable_switch
 
 variables:
   dehumidifier: !input dehumidifier
@@ -145,6 +158,10 @@ variables:
   periodic_check: !input periodic_check
   tank_sensor: !input tank_sensor
   tank_full_state: !input tank_full_state
+  enable_switch: !input enable_switch
+  enabled: >-
+    {{ not (enable_switch is string and enable_switch not in ['', 'none', 'unknown', 'unavailable'])
+       or is_state(enable_switch, 'on') }}
   current_rh: "{{ states(humidity_sensor) | float(-1) }}"
   is_on: "{{ is_state(dehumidifier, 'on') }}"
   tank_full: >-
@@ -178,11 +195,30 @@ triggers:
   - trigger: time_pattern
     minutes: !input periodic_minutes
     id: periodic
+  # Enable-switch flips (template, so an empty optional switch simply never fires).
+  - trigger: template
+    value_template: >-
+      {{ enable_switch_t is string and enable_switch_t not in ['', 'none', 'unknown', 'unavailable']
+         and is_state(enable_switch_t, 'off') }}
+    id: disabled
+  - trigger: template
+    value_template: >-
+      {{ enable_switch_t is string and enable_switch_t not in ['', 'none', 'unknown', 'unavailable']
+         and is_state(enable_switch_t, 'on') }}
+    id: enabled
 
 conditions: []
 
 action:
   - choose:
+      # ===== Disabled via enable switch: park the unit, ignore everything else =====
+      - conditions:
+          - "{{ not enabled }}"
+        sequence:
+          - if: "{{ is_on }}"
+            then:
+              - action: humidifier.turn_off
+                target: { entity_id: "{{ dehumidifier }}" }
       # ===== Tank full: stop, and alert once on the transition =====
       - conditions:
           - "{{ tank_full }}"
